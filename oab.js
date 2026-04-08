@@ -101,9 +101,150 @@ function escapeHtml(value) {
     .replace(/'/g, "&#39;");
 }
 
+const GARBLED_PDF_CHAR_MAP = {
+  "\u0003": " ",
+  "\u0005": "A",
+  "\u0011": "B",
+  "\u0012": "C",
+  "\u0018": "D",
+  ";": "(",
+  "": "A",
+  "": "B",
+  "": "C",
+  "": "D",
+  Ă: "a",
+  ă: "a",
+  Ą: "a",
+  ď: "b",
+  Đ: "c",
+  Ě: "d",
+  Ę: "e",
+  ę: "e",
+  Ě: "d",
+  Ĝ: "g",
+  Ğ: "e",
+  ğ: "g",
+  Ġ: "e",
+  Ģ: "g",
+  Ĩ: "f",
+  ĩ: "i",
+  Ī: "i",
+  Ĭ: "i",
+  ĭ: "i",
+  Į: "i",
+  İ: "i",
+  ı: "i",
+  Ĵ: "j",
+  ĵ: "j",
+  Ő: "g",
+  ơ: "o",
+  Ţ: "t",
+  ƀ: "b",
+  Ɓ: "B",
+  Ƃ: "B",
+  Ɖ: "p",
+  Ɗ: "D",
+  Ƌ: "q",
+  ƌ: "r",
+  Ɛ: "s",
+  Ƒ: "F",
+  ƒ: "f",
+  Ɠ: "G",
+  Ɨ: "I",
+  Ƙ: "K",
+  ƚ: "t",
+  ƛ: "l",
+  Ɯ: "M",
+  Ɲ: "N",
+  ƞ: "n",
+  Ɵ: "o",
+  Ơ: "O",
+  Ƣ: "OI",
+  ƣ: "oi",
+  Ƥ: "P",
+  ƥ: "p",
+  Ʀ: "YR",
+  Ƨ: "S",
+  ƨ: "s",
+  Ʃ: "E",
+  ƪ: "sh",
+  ƫ: "t",
+  Ƭ: "T",
+  ƭ: "t",
+  Ʈ: "2",
+  Ư: "U",
+  ư: "u",
+  Ʊ: "Y",
+  Ʋ: "V",
+  Ƴ: "Y",
+  ƴ: "y",
+  Ƶ: "u",
+  ƶ: "z",
+  Ʒ: "3",
+  Ƹ: "E",
+  ƹ: "e",
+  ƺ: "z",
+  ǀ: "v",
+  ǁ: "w",
+  ǂ: "ll",
+  ǆ: "x",
+  Ǉ: "Y",
+  ǈ: "Lj",
+  ǉ: "lj",
+  Ǌ: "Nj",
+  ǋ: "nj",
+  ǌ: "z",
+  Ǎ: "A",
+  ǎ: "a",
+  Ǐ: "I",
+  ǐ: "i",
+  Ǒ: "O",
+  ǒ: "o",
+  Ǔ: "U",
+  ǔ: "u",
+  Ǟ: "A",
+  ǟ: "a",
+  Ǥ: "G",
+  ǥ: "g",
+  Ǧ: "G",
+  ǧ: "g",
+  Ǫ: "O",
+  ǫ: "o",
+  Ǭ: "O",
+  ǭ: "o",
+  ǰ: "j",
+  "Ͳ": "-",
+  "ͳ": "-",
+  "ʹ": "-",
+  "͵": "'",
+  ";": ";",
+  "Ϳ": ")"
+};
+
+function decodeGarbledPdfLine(line) {
+  const text = String(line || "");
+  const weirdCount = (text.match(/[\u0000-\u001f\u0100-\u024f\u0370-\u03ff]/g) || []).length;
+  if (weirdCount < 3) return text;
+  return [...text].map((char) => GARBLED_PDF_CHAR_MAP[char] ?? char).join("");
+}
+
 function normalizeText(text) {
   return String(text || "")
     .replace(/\r/g, "\n")
+    .replace(/[ϬΟО]/g, "0")
+    .replace(/ϭ/g, "1")
+    .replace(/Ϯ/g, "2")
+    .replace(/ϯ/g, "3")
+    .replace(/ϰ/g, "4")
+    .replace(/[ϱϵ]/g, "5")
+    .replace(/ϲ/g, "6")
+    .replace(/ϳ/g, "7")
+    .replace(/ϴ/g, "8")
+    .replace(/Ϲ/g, "9")
+    .split("\n")
+    .map((line) => decodeGarbledPdfLine(line))
+    .join("\n")
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, " ")
     .replace(/[\u00A0\u2007\u202F]/g, " ")
     .replace(/[\u201C\u201D]/g, '"')
     .replace(/[\u2018\u2019]/g, "'")
@@ -179,9 +320,35 @@ async function extractTextFromPdf(file) {
   const buffer = await file.arrayBuffer();
   const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
   const pages = [];
+
+  function buildLines(items) {
+    const lines = [];
+    for (const item of items) {
+      const lastLine = lines[lines.length - 1];
+      if (!lastLine || Math.abs(lastLine.y - item.y) > 2) {
+        lines.push({ y: item.y, parts: [item] });
+      } else {
+        lastLine.parts.push(item);
+      }
+    }
+
+    return lines
+      .map((line) => ({
+        y: line.y,
+        text: line.parts
+          .sort((a, b) => a.x - b.x)
+          .map((part) => part.str)
+          .join(" ")
+          .replace(/ +/g, " ")
+          .trim()
+      }))
+      .filter((line) => line.text);
+  }
+
   for (let i = 1; i <= pdf.numPages; i += 1) {
     const page = await pdf.getPage(i);
     const content = await page.getTextContent();
+    const viewport = page.getViewport({ scale: 1 });
     const items = content.items
       .filter((item) => item.str && item.str.trim())
       .map((item) => ({
@@ -195,18 +362,24 @@ async function extractTextFromPdf(file) {
         return a.x - b.x;
       });
 
-    const lines = [];
-    for (const item of items) {
-      const lastLine = lines[lines.length - 1];
-      if (!lastLine || Math.abs(lastLine.y - item.y) > 2) {
-        lines.push({ y: item.y, parts: [item.str] });
-      } else {
-        lastLine.parts.push(item.str);
-      }
-    }
+    const topThreshold = items.length ? Math.max(...items.map((item) => item.y)) - 28 : 0;
+    const separatorX = viewport.width * 0.5;
+    const topItems = items.filter((item) => item.y >= topThreshold);
+    const bodyItems = items.filter((item) => item.y < topThreshold);
+    const leftItems = bodyItems.filter((item) => item.x < separatorX);
+    const rightItems = bodyItems.filter((item) => item.x >= separatorX);
+    const hasTwoColumns = leftItems.length >= 30 && rightItems.length >= 30;
 
-    const text = lines
-      .map((line) => line.parts.join(" ").replace(/ +/g, " ").trim())
+    const orderedLines = hasTwoColumns
+      ? [
+          ...buildLines(topItems),
+          ...buildLines(leftItems),
+          ...buildLines(rightItems)
+        ]
+      : buildLines(items);
+
+    const text = orderedLines
+      .map((line) => line.text)
       .filter(Boolean)
       .join("\n");
 
@@ -236,9 +409,13 @@ function extractAlternatives(block) {
   };
 }
 
-function detectQuestionStartNumber(line) {
+function detectQuestionStartNumber(line, nextLine = "") {
   const trimmed = String(line || "").trim();
+  const nextTrimmed = String(nextLine || "").trim();
   if (!trimmed) return null;
+  if (/\bEXAME\b/i.test(trimmed) || /\bORDEM\b/i.test(trimmed) || /\bUNIFICADO\b/i.test(trimmed) || /\bP[ÁA]GINA\b/i.test(trimmed) || /\bTIPO\b/i.test(trimmed)) {
+    return null;
+  }
 
   const patterns = [
     /^QUEST[AÃƒ]O\s*(\d{1,2})\b/i,
@@ -250,6 +427,11 @@ function detectQuestionStartNumber(line) {
   for (const pattern of patterns) {
     const match = trimmed.match(pattern);
     if (match) return Number(match[1]);
+  }
+
+  const standaloneNumber = trimmed.match(/^(\d{1,2})$/);
+  if (standaloneNumber && /^[A-ZÁÀÂÃÉÊÍÓÔÕÚÇ"“(]/.test(nextTrimmed)) {
+    return Number(standaloneNumber[1]);
   }
 
   return null;
@@ -264,21 +446,34 @@ function stripLeadingQuestionMarker(line, questionNumber) {
     .trim();
 }
 
+function updateAlternativeProgress(progress, line) {
+  let nextProgress = progress;
+  const normalizedLine = normalizeQuestionMarkers(line);
+  if (nextProgress < 1 && /A\)/.test(normalizedLine)) nextProgress = 1;
+  if (nextProgress < 2 && /B\)/.test(normalizedLine)) nextProgress = 2;
+  if (nextProgress < 3 && /C\)/.test(normalizedLine)) nextProgress = 3;
+  if (nextProgress < 4 && /D\)/.test(normalizedLine)) nextProgress = 4;
+  return nextProgress;
+}
+
 function splitQuestionBlocks(text) {
   const cleaned = normalizeQuestionMarkers(stripPdfNoise(text));
   const lines = cleaned.split(/\n+/).map((line) => line.trim()).filter(Boolean);
   const blocks = [];
   let current = null;
 
-  for (const line of lines) {
-    const detectedNumber = detectQuestionStartNumber(line);
-    const currentBody = current ? current.lines.join("\n") : "";
-    const currentLooksComplete = /A\)[\s\S]*B\)[\s\S]*C\)[\s\S]*D\)/.test(currentBody);
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const nextLine = lines[index + 1] || "";
+    const detectedNumber = detectQuestionStartNumber(line, nextLine);
+    const currentLooksComplete = current ? current.alternativeProgress === 4 : false;
+    const lineIsStandaloneNumber = /^\d{1,2}$/.test(line);
     const shouldStartNewBlock = detectedNumber
       && detectedNumber >= 1
       && detectedNumber <= 80
       && (
         !current
+        || (lineIsStandaloneNumber && currentLooksComplete)
         || detectedNumber === current.numeroQuestao + 1
         || (detectedNumber > current.numeroQuestao && currentLooksComplete)
       );
@@ -286,7 +481,7 @@ function splitQuestionBlocks(text) {
     if (shouldStartNewBlock) {
       if (current) {
         const body = current.lines.join("\n").trim();
-        if (body && /A\)[\s\S]*B\)[\s\S]*C\)[\s\S]*D\)/.test(body)) {
+        if (body && current.alternativeProgress === 4) {
           blocks.push({
             numeroQuestao: current.numeroQuestao,
             body
@@ -296,20 +491,27 @@ function splitQuestionBlocks(text) {
 
       current = {
         numeroQuestao: detectedNumber,
-        lines: []
+        lines: [],
+        alternativeProgress: 0
       };
 
       const firstLine = stripLeadingQuestionMarker(line, detectedNumber);
-      if (firstLine) current.lines.push(firstLine);
+      if (firstLine) {
+        current.lines.push(firstLine);
+        current.alternativeProgress = updateAlternativeProgress(current.alternativeProgress, firstLine);
+      }
       continue;
     }
 
-    if (current) current.lines.push(line);
+    if (current) {
+      current.lines.push(line);
+      current.alternativeProgress = updateAlternativeProgress(current.alternativeProgress, line);
+    }
   }
 
   if (current) {
     const body = current.lines.join("\n").trim();
-    if (body && /A\)[\s\S]*B\)[\s\S]*C\)[\s\S]*D\)/.test(body)) {
+    if (body && current.alternativeProgress === 4) {
       blocks.push({
         numeroQuestao: current.numeroQuestao,
         body
