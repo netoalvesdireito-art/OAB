@@ -1,4 +1,4 @@
-import * as pdfjsLib from "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.8.69/pdf.min.mjs";
+﻿import * as pdfjsLib from "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.8.69/pdf.min.mjs";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.8.69/pdf.worker.min.mjs";
 
@@ -115,9 +115,12 @@ function normalizeText(text) {
 
 function normalizeQuestionMarkers(text) {
   return String(text || "")
-    .replace(/\bQUEST[AÃ]O\s+(\d{1,2})/gi, "\n$1 ")
+    .replace(/\bQUEST[AÃƒ]O\s+(\d{1,2})/gi, "\n$1 ")
+    .replace(/(^|[\n\r])\s*(\d{1,2})\s*[º°o]?\s*QUEST[AÃƒ]O/gi, "$1$2 ")
+    .replace(/(^|[\n\r])\s*(\d{1,2})\s*[-–—]\s*/g, "$1$2 ")
     .replace(/(^|[\n\r\s])([ABCD])\s*[\.\-:]/g, "$1$2)")
     .replace(/(^|[\n\r\s])([ABCD])\s+\)/g, "$1$2)")
+    .replace(/(^|[\n\r])\s*([ABCD])\s+/g, "$1$2) ")
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n");
 }
@@ -127,7 +130,7 @@ function stripPdfNoise(text) {
     .replace(/FGV PROJETOS[\s\S]*?ORDEM DOS ADVOGADOS DO BRASIL/gi, " ")
     .replace(/XLI{0,3}\s+EXAME[\s\S]*?UNIFICADO/gi, " ")
     .replace(/PROVA PRATICO-PROFISSIONAL/gi, " ")
-    .replace(/P[ÁA]GINA\s+\d+/gi, " ")
+    .replace(/P[ÃA]GINA\s+\d+/gi, " ")
     .replace(/\bTIPO\s+\d\b/gi, " ")
     .replace(/\n{3,}/g, "\n\n");
 }
@@ -229,20 +232,22 @@ function extractAlternatives(block) {
 
   return {
     enunciado: normalizedBlock.slice(0, positions[0]).replace(/\s+/g, " ").trim(),
-    alternativas
+    alternativas: alternatives
   };
 }
 
 function splitQuestionBlocks(text) {
   const cleaned = normalizeQuestionMarkers(stripPdfNoise(text));
   const blocks = [];
-  const regex = /(?:^|\n)\s*(\d{1,2})[\s\.]+\s*([\s\S]*?)(?=(?:\n\s*(?:\d{1,2})[\s\.]+\s*)|$)/g;
+  const regex = /(?:^|\n)\s*(\d{1,2})\s+([\s\S]*?)(?=(?:\n\s*(?:\d{1,2})\s+)|$)/g;
   let match;
 
   while ((match = regex.exec(cleaned)) !== null) {
+    const body = match[2].trim();
+    if (!body || !/A\)[\s\S]*B\)[\s\S]*C\)[\s\S]*D\)/.test(body)) continue;
     blocks.push({
       numeroQuestao: Number(match[1]),
-      body: match[2].trim()
+      body
     });
   }
 
@@ -567,7 +572,13 @@ async function handleQuestionPdfImport(files) {
       return acc;
     }, new Map());
     state.questionBank = mergeQuestionsWithGabaritos(Array.from(merged.values()), state.gabaritosMap);
+    if (imported.length === 0) {
+      addLog("Nenhuma questao nova foi reconhecida. Verifique se o PDF esta em formato de prova objetiva e tente outro arquivo.");
+    }
     addLog(`Importacao concluida. Banco com ${imported.length} nova(s) questao(oes).`);
+    state.disciplinaFiltro = "Todas";
+    state.examFilter = "Todos";
+    state.search = "";
     resetLibraryView();
   } catch (error) {
     addLog(`Falha na importacao das provas: ${error.message}`);
@@ -1233,3 +1244,4 @@ app.addEventListener("input", (event) => {
 });
 
 render();
+
