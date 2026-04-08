@@ -236,52 +236,151 @@ function extractAlternatives(block) {
   };
 }
 
+function detectQuestionStartNumber(line) {
+  const trimmed = String(line || "").trim();
+  if (!trimmed) return null;
+
+  const patterns = [
+    /^QUEST[AÃƒ]O\s*(\d{1,2})\b/i,
+    /^(\d{1,2})\s*[º°o]?\s*QUEST[AÃƒ]O\b/i,
+    /^(\d{1,2})\s*[.-]\s*(?=[A-ZÁÀÂÃÉÊÍÓÔÕÚÇ(])/,
+    /^(\d{1,2})\s+(?=[A-ZÁÀÂÃÉÊÍÓÔÕÚÇ(])/
+  ];
+
+  for (const pattern of patterns) {
+    const match = trimmed.match(pattern);
+    if (match) return Number(match[1]);
+  }
+
+  return null;
+}
+
+function stripLeadingQuestionMarker(line, questionNumber) {
+  return String(line || "")
+    .replace(new RegExp(`^\\s*QUEST[AÃƒ]O\\s*${questionNumber}\\b\\s*`, "i"), "")
+    .replace(new RegExp(`^\\s*${questionNumber}\\s*[º°o]?\\s*QUEST[AÃƒ]O\\b\\s*`, "i"), "")
+    .replace(new RegExp(`^\\s*${questionNumber}\\s*[.-]\\s*`), "")
+    .replace(new RegExp(`^\\s*${questionNumber}\\s+`), "")
+    .trim();
+}
+
 function splitQuestionBlocks(text) {
   const cleaned = normalizeQuestionMarkers(stripPdfNoise(text));
+  const lines = cleaned.split(/\n+/).map((line) => line.trim()).filter(Boolean);
   const blocks = [];
-  const regex = /(?:^|\n)\s*(\d{1,2})\s+([\s\S]*?)(?=(?:\n\s*(?:\d{1,2})\s+)|$)/g;
-  let match;
+  let current = null;
 
-  while ((match = regex.exec(cleaned)) !== null) {
-    const body = match[2].trim();
-    if (!body || !/A\)[\s\S]*B\)[\s\S]*C\)[\s\S]*D\)/.test(body)) continue;
-    blocks.push({
-      numeroQuestao: Number(match[1]),
-      body
-    });
+  for (const line of lines) {
+    const detectedNumber = detectQuestionStartNumber(line);
+    const currentBody = current ? current.lines.join("\n") : "";
+    const currentLooksComplete = /A\)[\s\S]*B\)[\s\S]*C\)[\s\S]*D\)/.test(currentBody);
+    const shouldStartNewBlock = detectedNumber
+      && detectedNumber >= 1
+      && detectedNumber <= 80
+      && (
+        !current
+        || detectedNumber === current.numeroQuestao + 1
+        || (detectedNumber > current.numeroQuestao && currentLooksComplete)
+      );
+
+    if (shouldStartNewBlock) {
+      if (current) {
+        const body = current.lines.join("\n").trim();
+        if (body && /A\)[\s\S]*B\)[\s\S]*C\)[\s\S]*D\)/.test(body)) {
+          blocks.push({
+            numeroQuestao: current.numeroQuestao,
+            body
+          });
+        }
+      }
+
+      current = {
+        numeroQuestao: detectedNumber,
+        lines: []
+      };
+
+      const firstLine = stripLeadingQuestionMarker(line, detectedNumber);
+      if (firstLine) current.lines.push(firstLine);
+      continue;
+    }
+
+    if (current) current.lines.push(line);
+  }
+
+  if (current) {
+    const body = current.lines.join("\n").trim();
+    if (body && /A\)[\s\S]*B\)[\s\S]*C\)[\s\S]*D\)/.test(body)) {
+      blocks.push({
+        numeroQuestao: current.numeroQuestao,
+        body
+      });
+    }
   }
 
   return blocks;
 }
 
+function splitPagesIntoSections(pages, fileName = "") {
+  const sections = [];
+  let current = null;
+
+  for (const page of pages) {
+    const normalizedPage = normalizeText(page);
+    const exam = inferExamFromText(normalizedPage, fileName);
+    const tipoProva = inferTipoFromText(normalizedPage, fileName);
+    const hasExamMarker = /(40|41|42|43|44|45)\s*[\u00BAo]?\s*EXAME/i.test(normalizedPage) || /(40|41|42|43|44|45)O EXAME/i.test(normalizedPage);
+    const hasTipoMarker = /\bTIPO\s*[1-4]\b/i.test(normalizedPage) || /\b(BRANCA|VERDE|AMARELA|AZUL)\b/i.test(normalizedPage);
+    const startsNewSection = current && (hasExamMarker || hasTipoMarker) && (exam !== current.exam || tipoProva !== current.tipoProva);
+
+    if (!current || startsNewSection) {
+      if (current) sections.push(current);
+      current = {
+        exam,
+        tipoProva,
+        pages: [normalizedPage]
+      };
+      continue;
+    }
+
+    current.pages.push(normalizedPage);
+  }
+
+  if (current) sections.push(current);
+  return sections;
+}
+
 function parseQuestionsFromPages(pages, fileName = "") {
-  const joined = normalizeQuestionMarkers(stripPdfNoise(normalizeText(pages.join("\n\n"))));
-  const exam = inferExamFromText(joined, fileName);
-  const tipoProva = inferTipoFromText(joined, fileName);
   const parsed = [];
-  const blocks = splitQuestionBlocks(joined);
+  const sections = splitPagesIntoSections(pages, fileName);
 
-  for (const block of blocks) {
-    if (block.numeroQuestao < 1 || block.numeroQuestao > 80) continue;
-    const extracted = extractAlternatives(block.body);
-    if (!extracted) continue;
+  for (const section of sections) {
+    const joined = normalizeQuestionMarkers(stripPdfNoise(normalizeText(section.pages.join("\n\n"))));
+    const exam = section.exam || inferExamFromText(joined, fileName);
+    const tipoProva = section.tipoProva || inferTipoFromText(joined, fileName);
+    const blocks = splitQuestionBlocks(joined);
 
-    const disciplina = inferDisciplina(block.numeroQuestao, extracted.enunciado);
-    parsed.push({
-      id: `${exam.replace(/\s+/g, "-")}-${tipoProva.replace(/\s+/g, "-")}-${block.numeroQuestao}`,
-      exame: exam,
-      tipoProva,
-      numeroQuestao: block.numeroQuestao,
-      disciplina,
-      assunto: disciplina,
-      dificuldade: "Media",
-      enunciado: extracted.enunciado,
-      alternativas: extracted.alternativas,
-      correta: null,
-      explicacao: "Gabarito importado automaticamente quando disponivel.",
-      baseLegal: `Questao importada do arquivo ${fileName}.`,
-      origem: fileName || "PDF importado"
-    });
+    for (const block of blocks) {
+      if (block.numeroQuestao < 1 || block.numeroQuestao > 80) continue;
+      const extracted = extractAlternatives(block.body);
+      if (!extracted) continue;
+
+      const disciplina = inferDisciplina(block.numeroQuestao, extracted.enunciado);
+      parsed.push({
+        id: `${exam.replace(/\s+/g, "-")}-${tipoProva.replace(/\s+/g, "-")}-${block.numeroQuestao}`,
+        exame: exam,
+        tipoProva,
+        numeroQuestao: block.numeroQuestao,
+        disciplina,
+        assunto: disciplina,
+        dificuldade: "Media",
+        enunciado: extracted.enunciado,
+        alternativas: extracted.alternativas,
+        correta: null,
+        explicacao: "Gabarito importado automaticamente quando disponivel.",
+        baseLegal: `Questao importada do arquivo ${fileName}.`,
+        origem: fileName || "PDF importado"
+      });
+    }
   }
 
   return parsed.reduce((acc, item) => {
