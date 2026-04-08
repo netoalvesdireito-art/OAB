@@ -113,6 +113,25 @@ function normalizeText(text) {
     .trim();
 }
 
+function normalizeQuestionMarkers(text) {
+  return String(text || "")
+    .replace(/\bQUEST[AÃ]O\s+(\d{1,2})/gi, "\n$1 ")
+    .replace(/(^|[\n\r\s])([ABCD])\s*[\.\-:]/g, "$1$2)")
+    .replace(/(^|[\n\r\s])([ABCD])\s+\)/g, "$1$2)")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n");
+}
+
+function stripPdfNoise(text) {
+  return String(text || "")
+    .replace(/FGV PROJETOS[\s\S]*?ORDEM DOS ADVOGADOS DO BRASIL/gi, " ")
+    .replace(/XLI{0,3}\s+EXAME[\s\S]*?UNIFICADO/gi, " ")
+    .replace(/PROVA PRATICO-PROFISSIONAL/gi, " ")
+    .replace(/P[ÁA]GINA\s+\d+/gi, " ")
+    .replace(/\bTIPO\s+\d\b/gi, " ")
+    .replace(/\n{3,}/g, "\n\n");
+}
+
 function inferExamFromText(text, fallbackName = "") {
   const joined = `${fallbackName} ${text}`;
   const match = joined.match(/(40|41|42|43|44|45)\s*[\u00BAo]?\s*EXAME/i) || joined.match(/(40|41|42|43|44|45)O EXAME/i);
@@ -160,53 +179,99 @@ async function extractTextFromPdf(file) {
   for (let i = 1; i <= pdf.numPages; i += 1) {
     const page = await pdf.getPage(i);
     const content = await page.getTextContent();
-    const text = content.items.map((item) => item.str).join(" ");
+    const items = content.items
+      .filter((item) => item.str && item.str.trim())
+      .map((item) => ({
+        str: item.str,
+        x: item.transform[4],
+        y: item.transform[5]
+      }))
+      .sort((a, b) => {
+        const yDiff = Math.abs(b.y - a.y);
+        if (yDiff > 2) return b.y - a.y;
+        return a.x - b.x;
+      });
+
+    const lines = [];
+    for (const item of items) {
+      const lastLine = lines[lines.length - 1];
+      if (!lastLine || Math.abs(lastLine.y - item.y) > 2) {
+        lines.push({ y: item.y, parts: [item.str] });
+      } else {
+        lastLine.parts.push(item.str);
+      }
+    }
+
+    const text = lines
+      .map((line) => line.parts.join(" ").replace(/ +/g, " ").trim())
+      .filter(Boolean)
+      .join("\n");
+
     pages.push(normalizeText(text));
   }
   return pages;
 }
 
+function extractAlternatives(block) {
+  const normalizedBlock = normalizeQuestionMarkers(block);
+  const patterns = ["A)", "B)", "C)", "D)"];
+  const positions = patterns.map((label) => normalizedBlock.indexOf(label));
+  if (positions.some((pos) => pos === -1)) return null;
+
+  const alternatives = [];
+  for (let i = 0; i < patterns.length; i += 1) {
+    const start = positions[i] + patterns[i].length;
+    const end = i < patterns.length - 1 ? positions[i + 1] : block.length;
+    const text = normalizedBlock.slice(start, end).replace(/\s+/g, " ").trim();
+    if (!text) return null;
+    alternatives.push(text);
+  }
+
+  return {
+    enunciado: normalizedBlock.slice(0, positions[0]).replace(/\s+/g, " ").trim(),
+    alternativas
+  };
+}
+
+function splitQuestionBlocks(text) {
+  const cleaned = normalizeQuestionMarkers(stripPdfNoise(text));
+  const blocks = [];
+  const regex = /(?:^|\n)\s*(\d{1,2})[\s\.]+\s*([\s\S]*?)(?=(?:\n\s*(?:\d{1,2})[\s\.]+\s*)|$)/g;
+  let match;
+
+  while ((match = regex.exec(cleaned)) !== null) {
+    blocks.push({
+      numeroQuestao: Number(match[1]),
+      body: match[2].trim()
+    });
+  }
+
+  return blocks;
+}
+
 function parseQuestionsFromPages(pages, fileName = "") {
-  const joined = normalizeText(pages.join("\n\n"));
+  const joined = normalizeQuestionMarkers(stripPdfNoise(normalizeText(pages.join("\n\n"))));
   const exam = inferExamFromText(joined, fileName);
   const tipoProva = inferTipoFromText(joined, fileName);
-  const parts = joined.split(/(?=\n?\s*\d{1,2}\s+)/g).map((part) => part.trim());
   const parsed = [];
+  const blocks = splitQuestionBlocks(joined);
 
-  for (const part of parts) {
-    const numMatch = part.match(/^(\d{1,2})\s+/);
-    if (!numMatch) continue;
+  for (const block of blocks) {
+    if (block.numeroQuestao < 1 || block.numeroQuestao > 80) continue;
+    const extracted = extractAlternatives(block.body);
+    if (!extracted) continue;
 
-    const numeroQuestao = Number(numMatch[1]);
-    const optionBlocks = part.match(/A\)([\s\S]*?)B\)([\s\S]*?)C\)([\s\S]*?)D\)([\s\S]*)/);
-    if (!optionBlocks) continue;
-
-    const enunciado = part
-      .replace(/^(\d{1,2})\s+/, "")
-      .replace(/A\)([\s\S]*)$/, "")
-      .replace(/\s+/g, " ")
-      .trim();
-
-    const alternativas = [
-      optionBlocks[1].trim(),
-      optionBlocks[2].trim(),
-      optionBlocks[3].trim(),
-      optionBlocks[4].replace(/(?=\s\d{1,2}\s+[A-D]\))/g, " ").trim()
-    ].map((alt) => alt.replace(/\s+/g, " ").trim());
-
-    if (!enunciado || alternativas.some((alt) => !alt)) continue;
-
-    const disciplina = inferDisciplina(numeroQuestao, enunciado);
+    const disciplina = inferDisciplina(block.numeroQuestao, extracted.enunciado);
     parsed.push({
-      id: `${exam.replace(/\s+/g, "-")}-${tipoProva.replace(/\s+/g, "-")}-${numeroQuestao}`,
+      id: `${exam.replace(/\s+/g, "-")}-${tipoProva.replace(/\s+/g, "-")}-${block.numeroQuestao}`,
       exame: exam,
       tipoProva,
-      numeroQuestao,
+      numeroQuestao: block.numeroQuestao,
       disciplina,
       assunto: disciplina,
       dificuldade: "Media",
-      enunciado,
-      alternativas,
+      enunciado: extracted.enunciado,
+      alternativas: extracted.alternativas,
       correta: null,
       explicacao: "Gabarito importado automaticamente quando disponivel.",
       baseLegal: `Questao importada do arquivo ${fileName}.`,
@@ -214,7 +279,10 @@ function parseQuestionsFromPages(pages, fileName = "") {
     });
   }
 
-  return parsed;
+  return parsed.reduce((acc, item) => {
+    if (!acc.some((existing) => existing.id === item.id)) acc.push(item);
+    return acc;
+  }, []);
 }
 
 function parseGabaritosFromText(text) {
@@ -233,14 +301,27 @@ function parseGabaritosFromText(text) {
       const blockRegex = new RegExp(`${exam}[\\u00BAO]?\\s*EXAME[\\s\\S]{0,200}?TIPO\\s*${tipo.key}[\\s\\S]{0,2500}`, "i");
       const blockMatch = normalized.match(blockRegex);
       if (!blockMatch) continue;
-      const letters = blockMatch[0].match(/[ABCD]/g);
-      if (!letters || letters.length < 40) continue;
+      const pairs = [...blockMatch[0].matchAll(/(\d{1,2})\s*[-.:]?\s*([ABCD])/g)];
       const examName = `${exam}\u00ba Exame`;
       const mapKey = `${examName}::${tipo.label}`;
       result[mapKey] = {};
-      letters.slice(0, 80).forEach((letter, idx) => {
-        result[mapKey][idx + 1] = { A: 0, B: 1, C: 2, D: 3 }[letter];
-      });
+      if (pairs.length >= 40) {
+        pairs.forEach(([, questionNumber, letter]) => {
+          const number = Number(questionNumber);
+          if (number >= 1 && number <= 80) {
+            result[mapKey][number] = { A: 0, B: 1, C: 2, D: 3 }[letter];
+          }
+        });
+      } else {
+        const letters = blockMatch[0].match(/[ABCD]/g);
+        if (!letters || letters.length < 40) {
+          delete result[mapKey];
+          continue;
+        }
+        letters.slice(0, 80).forEach((letter, idx) => {
+          result[mapKey][idx + 1] = { A: 0, B: 1, C: 2, D: 3 }[letter];
+        });
+      }
     }
   }
 
